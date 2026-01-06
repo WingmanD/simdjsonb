@@ -6,6 +6,7 @@
 #include "simdjson/internal/tape_type.h"
 
 #include <cstring>
+#include <span>
 
 namespace simdjson {
 namespace internal {
@@ -110,6 +111,16 @@ inline std::string_view internal::tape_ref::get_string_view() const noexcept {
       get_c_str(),
       get_string_length()
   );
+}
+
+inline std::span<const std::byte> internal::tape_ref::get_binary() const noexcept {
+  size_t buf_index = size_t(tape_value());
+  const std::byte* data = reinterpret_cast<std::byte *>(&doc->string_buf[buf_index + sizeof(uint32_t)]);
+
+  uint32_t len;
+  std::memcpy(&len, &doc->string_buf[buf_index], sizeof(len));
+
+  return std::span(data,len);
 }
 
 } // namespace internal

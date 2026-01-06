@@ -117,7 +117,7 @@ if(SIMDJSON_STATIC_REFLECTION)
   set(SIMDJSON_CXX_STANDARD 26 CACHE STRING "the C++ standard to use for simdjson")
   #set(CMAKE_CXX_STANDARD ${SIMDJSON_CXX_STANDARD})
 else()
-  set(SIMDJSON_CXX_STANDARD 17 CACHE STRING "the C++ standard to use for simdjson")
+  set(SIMDJSON_CXX_STANDARD 20 CACHE STRING "the C++ standard to use for simdjson")
   set(CMAKE_CXX_STANDARD ${SIMDJSON_CXX_STANDARD})
 endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -224,7 +224,7 @@ endif()
 option(
     SIMDJSON_SKIPUTF8VALIDATION
     "SKIP UTF8 VALIDATION."
-    OFF
+    ON
 )
 if(SIMDJSON_SKIPUTF8VALIDATION)
   add_compile_definitions(SIMDJSON_UTF8VALIDATION=0)

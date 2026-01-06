@@ -292,6 +292,7 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::visit_root_primit
     case 't': return visitor.visit_root_true_atom(*this, value);
     case 'f': return visitor.visit_root_false_atom(*this, value);
     case 'n': return visitor.visit_root_null_atom(*this, value);
+    case 'b': return visitor.visit_root_binary(*this, value);
     case '-':
     case '0': case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8': case '9':
@@ -314,6 +315,7 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::visit_primitive(V
     case 't': return visitor.visit_true_atom(*this, value);
     case 'f': return visitor.visit_false_atom(*this, value);
     case 'n': return visitor.visit_null_atom(*this, value);
+    case 'b': return visitor.visit_binary(*this, value);
     default:
       log_error("Non-value found when value was expected!");
       return TAPE_ERROR;

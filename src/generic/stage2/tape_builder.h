@@ -65,12 +65,14 @@ struct tape_builder {
   simdjson_warn_unused simdjson_inline error_code visit_root_primitive(json_iterator &iter, const uint8_t *value) noexcept;
 
   simdjson_warn_unused simdjson_inline error_code visit_string(json_iterator &iter, const uint8_t *value, bool key = false) noexcept;
+  simdjson_warn_unused simdjson_inline error_code visit_binary(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_number(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_true_atom(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_false_atom(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_null_atom(json_iterator &iter, const uint8_t *value) noexcept;
 
   simdjson_warn_unused simdjson_inline error_code visit_root_string(json_iterator &iter, const uint8_t *value) noexcept;
+  simdjson_warn_unused simdjson_inline error_code visit_root_binary(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_root_number(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_root_true_atom(json_iterator &iter, const uint8_t *value) noexcept;
   simdjson_warn_unused simdjson_inline error_code visit_root_false_atom(json_iterator &iter, const uint8_t *value) noexcept;
@@ -93,6 +95,8 @@ private:
   simdjson_warn_unused simdjson_inline error_code empty_container(json_iterator &iter, internal::tape_type start, internal::tape_type end) noexcept;
   simdjson_inline uint8_t *on_start_string(json_iterator &iter) noexcept;
   simdjson_inline void on_end_string(uint8_t *dst) noexcept;
+  simdjson_inline uint8_t *on_start_binary(json_iterator &iter) noexcept;
+  simdjson_inline void on_end_binary(uint8_t *dst) noexcept;
 }; // struct tape_builder
 
 template<bool STREAMING>
@@ -166,8 +170,38 @@ simdjson_warn_unused simdjson_inline error_code tape_builder::visit_string(json_
   return SUCCESS;
 }
 
+simdjson_warn_unused simdjson_inline error_code tape_builder::visit_binary(json_iterator &iter, const uint8_t *value) noexcept {
+  iter.log_value("binary");
+
+  uint8_t offset = 1;
+  uint8_t c = *(value + offset);
+  uint64_t size = 0;
+  while (c != '_') {
+    size = size * 10 + c - 48;
+
+    ++offset;
+    c = *(value + offset);
+  }
+  ++offset;
+
+  tape.append(current_string_buf_loc - iter.dom_parser.doc->string_buf.get(), internal::tape_type::BINARY);
+  uint8_t *dst = current_string_buf_loc + sizeof(uint32_t);
+
+  memcpy(current_string_buf_loc, &size, sizeof(uint64_t));
+
+  memcpy(dst, value + offset, size);
+
+  current_string_buf_loc = dst + size + offset;
+
+  return SUCCESS;
+}
+
 simdjson_warn_unused simdjson_inline error_code tape_builder::visit_root_string(json_iterator &iter, const uint8_t *value) noexcept {
   return visit_string(iter, value);
+}
+
+simdjson_warn_unused simdjson_inline error_code tape_builder::visit_root_binary(json_iterator &iter, const uint8_t *value) noexcept {
+  return visit_binary(iter, value);
 }
 
 simdjson_warn_unused simdjson_inline error_code tape_builder::visit_number(json_iterator &iter, const uint8_t *value) noexcept {
@@ -278,6 +312,24 @@ simdjson_inline uint8_t *tape_builder::on_start_string(json_iterator &iter) noex
 }
 
 simdjson_inline void tape_builder::on_end_string(uint8_t *dst) noexcept {
+  uint32_t str_length = uint32_t(dst - (current_string_buf_loc + sizeof(uint32_t)));
+  // TODO check for overflow in case someone has a crazy string (>=4GB?)
+  // But only add the overflow check when the document itself exceeds 4GB
+  // Currently unneeded because we refuse to parse docs larger or equal to 4GB.
+  memcpy(current_string_buf_loc, &str_length, sizeof(uint32_t));
+  // NULL termination is still handy if you expect all your strings to
+  // be NULL terminated? It comes at a small cost
+  *dst = 0;
+  current_string_buf_loc = dst + 1;
+}
+
+simdjson_inline uint8_t *tape_builder::on_start_binary(json_iterator &iter) noexcept {
+  // we advance the point, accounting for the fact that we have a NULL termination
+  tape.append(current_string_buf_loc - iter.dom_parser.doc->string_buf.get(), internal::tape_type::BINARY);
+  return current_string_buf_loc + sizeof(uint32_t);
+}
+
+simdjson_inline void tape_builder::on_end_binary(uint8_t *dst) noexcept {
   uint32_t str_length = uint32_t(dst - (current_string_buf_loc + sizeof(uint32_t)));
   // TODO check for overflow in case someone has a crazy string (>=4GB?)
   // But only add the overflow check when the document itself exceeds 4GB

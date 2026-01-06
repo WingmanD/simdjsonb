@@ -19,7 +19,8 @@ enum class tape_type {
   DOUBLE = 'd',
   TRUE_VALUE = 't',
   FALSE_VALUE = 'f',
-  NULL_VALUE = 'n'
+  NULL_VALUE = 'n',
+  BINARY = 'b'
 }; // enum class tape_type
 
 } // namespace internal

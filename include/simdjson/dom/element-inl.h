@@ -81,6 +81,10 @@ simdjson_inline simdjson_result<bool> simdjson_result<dom::element>::get_bool() 
   if (error()) { return error(); }
   return first.get_bool();
 }
+simdjson_inline simdjson_result<std::span<const std::byte>> simdjson_result<dom::element>::get_binary() const noexcept {
+  if (error()) { return error(); }
+  return first.get_binary();
+}
 
 simdjson_inline bool simdjson_result<dom::element>::is_array() const noexcept {
   return !error() && first.is_array();
@@ -105,6 +109,9 @@ simdjson_inline bool simdjson_result<dom::element>::is_number() const noexcept {
 }
 simdjson_inline bool simdjson_result<dom::element>::is_bool() const noexcept {
   return !error() && first.is_bool();
+}
+simdjson_inline bool simdjson_result<dom::element>::is_binary() const noexcept {
+  return !error() && first.is_binary();
 }
 
 simdjson_inline bool simdjson_result<dom::element>::is_null() const noexcept {
@@ -217,6 +224,15 @@ inline simdjson_result<bool> element::get_bool() const noexcept {
     return false;
   }
   return INCORRECT_TYPE;
+}
+inline simdjson_result<std::span<const std::byte>> element::get_binary() const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+  switch (tape.tape_ref_type()) {
+  case internal::tape_type::BINARY:
+    return tape.get_binary();
+  default:
+    return INCORRECT_TYPE;
+  }
 }
 inline simdjson_result<const char *> element::get_c_str() const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
@@ -340,6 +356,7 @@ simdjson_inline bool element::is() const noexcept {
 
 template<> inline simdjson_result<array> element::get<array>() const noexcept { return get_array(); }
 template<> inline simdjson_result<object> element::get<object>() const noexcept { return get_object(); }
+template<> inline simdjson_result<std::span<const std::byte>> element::get<std::span<const std::byte>>() const noexcept { return get_binary(); }
 template<> inline simdjson_result<const char *> element::get<const char *>() const noexcept { return get_c_str(); }
 template<> inline simdjson_result<std::string_view> element::get<std::string_view>() const noexcept { return get_string(); }
 template<> inline simdjson_result<int64_t> element::get<int64_t>() const noexcept { return get_int64(); }
@@ -354,6 +371,7 @@ inline bool element::is_int64() const noexcept { return is<int64_t>(); }
 inline bool element::is_uint64() const noexcept { return is<uint64_t>(); }
 inline bool element::is_double() const noexcept { return is<double>(); }
 inline bool element::is_bool() const noexcept { return is<bool>(); }
+inline bool element::is_binary() const noexcept { return is<std::span<const std::byte>>(); }
 inline bool element::is_number() const noexcept { return is_int64() || is_uint64() || is_double(); }
 
 inline bool element::is_null() const noexcept {
@@ -370,6 +388,7 @@ inline element::operator int64_t() const noexcept(false) { return get<int64_t>()
 inline element::operator double() const noexcept(false) { return get<double>(); }
 inline element::operator array() const noexcept(false) { return get<array>(); }
 inline element::operator object() const noexcept(false) { return get<object>(); }
+inline element::operator std::span<const std::byte>() const noexcept(false) { return get<std::span<const std::byte>>(); }
 
 inline array::iterator element::begin() const noexcept(false) {
   return get<array>().begin();

@@ -3,6 +3,8 @@
 
 #include "simdjson/base.h"
 
+#include <span>
+
 namespace simdjson {
 namespace dom {
 class document;
@@ -33,6 +35,7 @@ public:
   simdjson_inline uint32_t get_string_length() const noexcept;
   simdjson_inline const char * get_c_str() const noexcept;
   inline std::string_view get_string_view() const noexcept;
+  inline std::span<const std::byte> get_binary() const noexcept;
   simdjson_inline bool is_document_root() const noexcept;
   simdjson_inline bool usable() const noexcept;
 

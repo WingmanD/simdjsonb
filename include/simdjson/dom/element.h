@@ -21,7 +21,8 @@ enum class element_type {
   DOUBLE = 'd',    ///< double: Any number with a "." or "e" that fits in double.
   STRING = '"',    ///< std::string_view
   BOOL = 't',      ///< bool
-  NULL_VALUE = 'n' ///< null
+  NULL_VALUE = 'n', ///< null
+  BINARY = 'b' ///< binary value
 };
 
 /**
@@ -121,6 +122,14 @@ public:
   inline simdjson_result<bool> get_bool() const noexcept;
 
   /**
+   * Cast this element to a binary value.
+   *
+   * @returns A std::byte span.
+   *          Returns INCORRECT_TYPE if the JSON element is not a binary value.
+   */
+  inline simdjson_result<std::span<const std::byte>> get_binary() const noexcept;
+
+  /**
    * Whether this element is a json array.
    *
    * Equivalent to is<array>().
@@ -174,6 +183,11 @@ public:
    * Whether this element is a json `null`.
    */
   inline bool is_null() const noexcept;
+
+  /**
+   * Whether this element is a json `binary`.
+   */
+  inline bool is_binary() const noexcept;
 
   /**
    * Tell whether the value can be cast to provided type (T).
@@ -327,6 +341,14 @@ public:
    * @exception simdjson_error(INCORRECT_TYPE) if the JSON element is not an object
    */
   inline operator object() const noexcept(false);
+
+  /**
+   * Read this element as binary.
+   *
+   * @return The binary.
+   * @exception simdjson_error(INCORRECT_TYPE) if the JSON element is not a binary
+   */
+  inline operator std::span<const std::byte>() const noexcept(false);
 
   /**
    * Iterate over each element in this array.
@@ -533,6 +555,7 @@ public:
   simdjson_inline simdjson_result<uint64_t> get_uint64() const noexcept;
   simdjson_inline simdjson_result<double> get_double() const noexcept;
   simdjson_inline simdjson_result<bool> get_bool() const noexcept;
+  simdjson_inline simdjson_result<std::span<const std::byte>> get_binary() const noexcept;
 
   simdjson_inline bool is_array() const noexcept;
   simdjson_inline bool is_object() const noexcept;
@@ -542,6 +565,7 @@ public:
   simdjson_inline bool is_double() const noexcept;
   simdjson_inline bool is_number() const noexcept;
   simdjson_inline bool is_bool() const noexcept;
+  simdjson_inline bool is_binary() const noexcept;
   simdjson_inline bool is_null() const noexcept;
 
   simdjson_inline simdjson_result<dom::element> operator[](std::string_view key) const noexcept;

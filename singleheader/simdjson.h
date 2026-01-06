@@ -1,4 +1,4 @@
-/* auto-generated on 2025-08-12 19:38:50 -0400. version 4.0.0 Do not edit! */
+/* auto-generated on 2025-08-15 15:13:36 -0400. version 4.0.0 Do not edit! */
 /* including simdjson.h:  */
 /* begin file simdjson.h */
 #ifndef SIMDJSON_H
@@ -141,11 +141,11 @@
 #endif // defined(__cpp_concepts) && !defined(SIMDJSON_CONCEPT_DISABLED)
 
 #if !defined(SIMDJSON_CONSTEVAL)
-#if defined(__cpp_consteval) && __cpp_consteval >= 201811L
+#if defined(__cpp_consteval) && __cpp_consteval >= 201811L && defined(__cpp_lib_constexpr_string) && __cpp_lib_constexpr_string >= 201907L
 #define SIMDJSON_CONSTEVAL 1
 #else
 #define SIMDJSON_CONSTEVAL 0
-#endif // defined(__cpp_consteval) && __cpp_consteval >= 201811L
+#endif // defined(__cpp_consteval) && __cpp_consteval >= 201811L && defined(__cpp_lib_constexpr_string) && __cpp_lib_constexpr_string >= 201907L
 #endif // !defined(SIMDJSON_CONSTEVAL)
 
 #endif // SIMDJSON_COMPILER_CHECK_H
@@ -4054,6 +4054,9 @@ public:
   /** The number of allocated bytes. */
   inline size_t capacity() const noexcept;
 
+  /** check that the view has sufficient padding */
+  inline bool has_sufficient_padding() const noexcept;
+
   /**
    * Remove the UTF-8 Byte Order Mark (BOM) if it exists.
    *
@@ -4080,14 +4083,24 @@ inline std::ostream& operator<<(std::ostream& out, simdjson_result<padded_string
 #endif
 
 /**
- * Create a padded_string_view from a string. The string will be padded with SIMDJSON_PADDING
+ * Create a padded_string_view from a string. The string will be padded with up to SIMDJSON_PADDING
  * space characters. The resulting padded_string_view will have a length equal to the original
- * string.
+ * string, except maybe for trailing white space characters.
  *
  * @param s The string.
  * @return The padded string.
  */
 inline padded_string_view pad(std::string& s) noexcept;
+
+/**
+ * Create a padded_string_view from a string. The capacity of the string will be padded with SIMDJSON_PADDING
+ * characters. The resulting padded_string_view will have a length equal to the original
+ * string.
+ *
+ * @param s The string.
+ * @return The padded string.
+ */
+inline padded_string_view pad_with_reserve(std::string& s) noexcept;
 } // namespace simdjson
 
 #endif // SIMDJSON_PADDED_STRING_VIEW_H
@@ -4133,6 +4146,22 @@ inline padded_string_view::padded_string_view(std::string_view s, size_t capacit
   if(_capacity < s.length()) { _capacity = s.length(); }
 }
 
+inline bool padded_string_view::has_sufficient_padding() const noexcept {
+  if (padding() >= SIMDJSON_PADDING) {
+    return true;
+  }
+  size_t missing_padding = SIMDJSON_PADDING - padding();
+  if(length() < missing_padding) { return false; }
+
+  for (size_t i = length() - missing_padding; i < length(); i++) {
+    char c = data()[i];
+    if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+      return false;
+    }
+  }
+  return true;
+}
+
 inline size_t padded_string_view::capacity() const noexcept { return _capacity; }
 
 inline size_t padded_string_view::padding() const noexcept { return capacity() - length(); }
@@ -4152,10 +4181,33 @@ inline std::ostream& operator<<(std::ostream& out, simdjson_result<padded_string
 #endif
 
 inline padded_string_view pad(std::string& s) noexcept {
-  const auto len = s.size();
-  s.append(SIMDJSON_PADDING, ' ');
-  return padded_string_view(s.data(), len, s.size());
+  size_t existing_padding = 0;
+  for (size_t i = s.size(); i > 0; i--) {
+    char c = s[i - 1];
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+      existing_padding++;
+    } else {
+      break;
+    }
+  }
+  size_t needed_padding = 0;
+  if (existing_padding < SIMDJSON_PADDING) {
+    needed_padding = SIMDJSON_PADDING - existing_padding;
+    s.append(needed_padding, ' ');
+  }
+
+  return padded_string_view(s.data(), s.size() - needed_padding, s.size());
 }
+
+inline padded_string_view pad_with_reserve(std::string& s) noexcept {
+  if (s.capacity() - s.size() < SIMDJSON_PADDING) {
+    s.reserve(s.size() + SIMDJSON_PADDING );
+  }
+  return padded_string_view(s.data(), s.size(), s.capacity());
+}
+
+
+
 } // namespace simdjson
 
 
@@ -4422,6 +4474,8 @@ class tape_ref;
 #ifndef SIMDJSON_DOM_ARRAY_H
 #define SIMDJSON_DOM_ARRAY_H
 
+#include <vector>
+
 /* skipped duplicate #include "simdjson/dom/base.h" */
 /* including simdjson/internal/tape_ref.h: #include "simdjson/internal/tape_ref.h" */
 /* begin file simdjson/internal/tape_ref.h */
@@ -4429,6 +4483,8 @@ class tape_ref;
 #define SIMDJSON_INTERNAL_TAPE_REF_H
 
 /* skipped duplicate #include "simdjson/base.h" */
+
+#include <span>
 
 namespace simdjson {
 namespace dom {
@@ -4460,6 +4516,7 @@ public:
   simdjson_inline uint32_t get_string_length() const noexcept;
   simdjson_inline const char * get_c_str() const noexcept;
   inline std::string_view get_string_view() const noexcept;
+  inline std::span<const std::byte> get_binary() const noexcept;
   simdjson_inline bool is_document_root() const noexcept;
   simdjson_inline bool usable() const noexcept;
 
@@ -4581,6 +4638,17 @@ public:
   inline simdjson_result<element> at_pointer(std::string_view json_pointer) const noexcept;
 
   /**
+   * Recursive function which processes the json path of each child element
+   */
+  inline void process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept;
+
+
+  /**
+   * Adds support for JSONPath expression with wildcards '*'
+   */
+  inline simdjson_result<std::vector<element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
+
+  /**
    * Get the value associated with the given JSONPath expression. We only support
    * JSONPath queries that trivially convertible to JSON Pointer queries: key
    * names and array indices.
@@ -4614,6 +4682,15 @@ public:
   inline simdjson_result<element> at(size_t index) const noexcept;
 
   /**
+   * Gets the values of items in an array element
+   * This function has linear-time complexity: the values are checked one by one.
+   *
+   * @return The child elements of an array
+   */
+
+  inline std::vector<element>& get_values(std::vector<element>& out) const noexcept;
+
+  /**
    * Implicitly convert object to element
    */
   inline operator element() const noexcept;
@@ -4639,8 +4716,11 @@ public:
   simdjson_inline simdjson_result(error_code error) noexcept; ///< @private
 
   inline simdjson_result<dom::element> at_pointer(std::string_view json_pointer) const noexcept;
+  inline void process_json_path_of_child_elements(std::vector<dom::element>::iterator& current, std::vector<dom::element>::iterator& end, const std::string_view& path_suffix, std::vector<dom::element>& accumulator) const noexcept;
+  inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
   inline simdjson_result<dom::element> at_path(std::string_view json_path) const noexcept;
   inline simdjson_result<dom::element> at(size_t index) const noexcept;
+  inline std::vector<dom::element>& get_values(std::vector<dom::element>& out) const noexcept;
 
 #if SIMDJSON_EXCEPTIONS
   inline dom::array::iterator begin() const noexcept(false);
@@ -4875,8 +4955,8 @@ public:
    *         - other json errors if parsing fails. You should not rely on these errors to always the same for the
    *           same document: they may vary under runtime dispatch (so they may vary depending on your system and hardware).
    */
-  inline simdjson_result<element> load(const std::string &path) & noexcept;
-  inline simdjson_result<element> load(const std::string &path) &&  = delete ;
+  inline simdjson_result<element> load(std::string_view path) & noexcept;
+  inline simdjson_result<element> load(std::string_view path) &&  = delete ;
 
   /**
    * Load a JSON document from a file into a provide document instance and return a temporary reference to it.
@@ -4921,8 +5001,8 @@ public:
    *         - other json errors if parsing fails. You should not rely on these errors to always the same for the
    *           same document: they may vary under runtime dispatch (so they may vary depending on your system and hardware).
    */
-  inline simdjson_result<element> load_into_document(document& doc, const std::string &path) & noexcept;
-  inline simdjson_result<element> load_into_document(document& doc, const std::string &path) && =delete;
+  inline simdjson_result<element> load_into_document(document& doc, std::string_view path) & noexcept;
+  inline simdjson_result<element> load_into_document(document& doc, std::string_view path) && =delete;
 
   /**
    * Parse a JSON document and return a temporary reference to it.
@@ -5159,7 +5239,7 @@ public:
    *         - other json errors if parsing fails. You should not rely on these errors to always the same for the
    *           same document: they may vary under runtime dispatch (so they may vary depending on your system and hardware).
    */
-  inline simdjson_result<document_stream> load_many(const std::string &path, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
+  inline simdjson_result<document_stream> load_many(std::string_view path, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
 
   /**
    * Parse a buffer containing many JSON documents.
@@ -5430,7 +5510,7 @@ private:
   inline error_code ensure_capacity(document& doc, size_t desired_capacity) noexcept;
 
   /** Read the file into loaded_bytes */
-  inline simdjson_result<size_t> read_file(const std::string &path) noexcept;
+  inline simdjson_result<size_t> read_file(std::string_view path) noexcept;
 
   friend class parser::Iterator;
   friend class document_stream;
@@ -5767,6 +5847,8 @@ public:
 #ifndef SIMDJSON_DOM_ELEMENT_H
 #define SIMDJSON_DOM_ELEMENT_H
 
+#include <vector>
+
 /* skipped duplicate #include "simdjson/dom/base.h" */
 /* skipped duplicate #include "simdjson/dom/array.h" */
 
@@ -5785,7 +5867,8 @@ enum class element_type {
   DOUBLE = 'd',    ///< double: Any number with a "." or "e" that fits in double.
   STRING = '"',    ///< std::string_view
   BOOL = 't',      ///< bool
-  NULL_VALUE = 'n' ///< null
+  NULL_VALUE = 'n', ///< null
+  BINARY = 'b' ///< binary value
 };
 
 /**
@@ -5885,6 +5968,14 @@ public:
   inline simdjson_result<bool> get_bool() const noexcept;
 
   /**
+   * Cast this element to a binary value.
+   *
+   * @returns A std::byte span.
+   *          Returns INCORRECT_TYPE if the JSON element is not a binary value.
+   */
+  inline simdjson_result<std::span<const std::byte>> get_binary() const noexcept;
+
+  /**
    * Whether this element is a json array.
    *
    * Equivalent to is<array>().
@@ -5938,6 +6029,11 @@ public:
    * Whether this element is a json `null`.
    */
   inline bool is_null() const noexcept;
+
+  /**
+   * Whether this element is a json `binary`.
+   */
+  inline bool is_binary() const noexcept;
 
   /**
    * Tell whether the value can be cast to provided type (T).
@@ -6093,6 +6189,14 @@ public:
   inline operator object() const noexcept(false);
 
   /**
+   * Read this element as binary.
+   *
+   * @return The binary.
+   * @exception simdjson_error(INCORRECT_TYPE) if the JSON element is not a binary
+   */
+  inline operator std::span<const std::byte>() const noexcept(false);
+
+  /**
    * Iterate over each element in this array.
    *
    * @return The beginning of the iteration.
@@ -6164,6 +6268,8 @@ public:
    *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
    */
   inline simdjson_result<element> at_pointer(const std::string_view json_pointer) const noexcept;
+
+  inline simdjson_result<std::vector<element>> at_path_with_wildcard(const std::string_view json_path) const noexcept;
 
   /**
    * Get the value associated with the given JSONPath expression. We only support
@@ -6310,6 +6416,7 @@ public:
   simdjson_inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
   simdjson_result<dom::element> operator[](int) const noexcept = delete;
   simdjson_inline simdjson_result<dom::element> at_pointer(const std::string_view json_pointer) const noexcept;
+  simdjson_inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(const std::string_view json_path) const noexcept;
   simdjson_inline simdjson_result<dom::element> at_path(const std::string_view json_path) const noexcept;
   [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
   simdjson_inline simdjson_result<dom::element> at(const std::string_view json_pointer) const noexcept;
@@ -6340,6 +6447,8 @@ public:
 /* begin file simdjson/dom/object.h */
 #ifndef SIMDJSON_DOM_OBJECT_H
 #define SIMDJSON_DOM_OBJECT_H
+
+#include <vector>
 
 /* skipped duplicate #include "simdjson/dom/base.h" */
 /* skipped duplicate #include "simdjson/dom/element.h" */
@@ -6513,6 +6622,16 @@ public:
   inline simdjson_result<element> at_pointer(std::string_view json_pointer) const noexcept;
 
   /**
+   * Recursive function which processes the json path of each child element
+   */
+  inline void process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept;
+
+  /**
+   * Adds support for JSONPath expression with wildcards '*'
+   */
+  inline simdjson_result<std::vector<element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
+
+  /**
    * Get the value associated with the given JSONPath expression. We only support
    * JSONPath queries that trivially convertible to JSON Pointer queries: key
    * names and array indices.
@@ -6542,6 +6661,14 @@ public:
    *         - NO_SUCH_FIELD if the field does not exist in the object
    */
   inline simdjson_result<element> at_key(std::string_view key) const noexcept;
+
+  /**
+   * Gets the values associated with keys of an object
+   * This function has linear-time complexity: the keys are checked one by one.
+   *
+   * @return the values associated with each key of an object
+   */
+  inline std::vector<element>& get_values(std::vector<element>& out) const noexcept;
 
   /**
    * Get the value associated with the given key in a case-insensitive manner.
@@ -6601,8 +6728,11 @@ public:
   inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
   simdjson_result<dom::element> operator[](int) const noexcept = delete;
   inline simdjson_result<dom::element> at_pointer(std::string_view json_pointer) const noexcept;
+  inline void process_json_path_of_child_elements(std::vector<dom::element>::iterator& current, std::vector<dom::element>::iterator& end, const std::string_view& path_suffix, std::vector<dom::element>& accumulator) const noexcept;
+  inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(std::string_view json_path_new) const noexcept;
   inline simdjson_result<dom::element> at_path(std::string_view json_path) const noexcept;
   inline simdjson_result<dom::element> at_key(std::string_view key) const noexcept;
+  inline std::vector<dom::element>& get_values(std::vector<dom::element>& out) const noexcept;
   inline simdjson_result<dom::element> at_key_case_insensitive(std::string_view key) const noexcept;
 
 #if SIMDJSON_EXCEPTIONS
@@ -6977,6 +7107,8 @@ template <class T> std::string prettify(simdjson_result<T> x) {
 #include <string>
 /* skipped duplicate #include "simdjson/common_defs.h" */
 
+#include <utility>
+
 namespace simdjson {
 /**
  * Converts JSONPath to JSON Pointer.
@@ -6985,7 +7117,6 @@ namespace simdjson {
  */
 inline std::string json_path_to_pointer_conversion(std::string_view json_path) {
   size_t i = 0;
-
   // if JSONPath starts with $, skip it
    // json_path.starts_with('$') requires C++20.
   if (!json_path.empty() && json_path.front() == '$') {
@@ -7034,6 +7165,49 @@ inline std::string json_path_to_pointer_conversion(std::string_view json_path) {
 
   return result;
 }
+
+inline std::pair<std::string_view, std::string_view> get_next_key_and_json_path(std::string_view& json_path) {
+  std::string_view key;
+
+  if (json_path.empty()) {
+    return {key, json_path};
+  }
+  size_t i = 0;
+
+  // if JSONPath starts with $, skip it
+  if (json_path.front() == '$') {
+    i = 1;
+  }
+
+
+  if (i < json_path.length() && json_path[i] == '.') {
+    i += 1;
+    size_t key_start = i;
+
+    while (i < json_path.length() && json_path[i] != '[' && json_path[i] != '.') {
+      ++i;
+    }
+
+    key = json_path.substr(key_start, i - key_start);
+  } else if ((i+1 < json_path.size()) && json_path[i] == '[' && (json_path[i+1] == '\'' || json_path[i+1] == '"')) {
+    i += 2;
+    size_t key_start = i;
+    while (i < json_path.length() && json_path[i] != '\'' && json_path[i] != '"') {
+      ++i;
+    }
+
+    key = json_path.substr(key_start, i - key_start);
+
+    i += 2;
+  } else if ((i+2 < json_path.size()) && json_path[i] == '[' && json_path[i+1] == '*' && json_path[i+2] == ']') { // i.e [*].additional_keys or [*]["additional_keys"]
+    key = "*";
+    i += 3;
+  }
+
+
+  return std::make_pair(key, json_path.substr(i));
+}
+
 } // namespace simdjson
 #endif // SIMDJSON_JSONPATHUTIL_H
 /* end file simdjson/jsonpathutil.h */
@@ -7067,7 +7241,8 @@ enum class tape_type {
   DOUBLE = 'd',
   TRUE_VALUE = 't',
   FALSE_VALUE = 'f',
-  NULL_VALUE = 'n'
+  NULL_VALUE = 'n',
+  BINARY = 'b'
 }; // enum class tape_type
 
 } // namespace internal
@@ -7077,6 +7252,7 @@ enum class tape_type {
 /* end file simdjson/internal/tape_type.h */
 
 #include <cstring>
+#include <span>
 
 namespace simdjson {
 namespace internal {
@@ -7183,6 +7359,16 @@ inline std::string_view internal::tape_ref::get_string_view() const noexcept {
   );
 }
 
+inline std::span<const std::byte> internal::tape_ref::get_binary() const noexcept {
+  size_t buf_index = size_t(tape_value());
+  const std::byte* data = reinterpret_cast<std::byte *>(&doc->string_buf[buf_index + sizeof(uint32_t)]);
+
+  uint32_t len;
+  std::memcpy(&len, &doc->string_buf[buf_index], sizeof(len));
+
+  return std::span(data,len);
+}
+
 } // namespace internal
 } // namespace simdjson
 
@@ -7231,9 +7417,20 @@ inline simdjson_result<dom::element> simdjson_result<dom::array>::at_pointer(std
   return at_pointer(json_pointer);
  }
 
+inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::array>::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  if (error()) {
+    return error();
+  }
+  return first.at_path_with_wildcard(json_path);
+}
+
 inline simdjson_result<dom::element> simdjson_result<dom::array>::at(size_t index) const noexcept {
   if (error()) { return error(); }
   return first.at(index);
+}
+
+inline std::vector<dom::element>& simdjson_result<dom::array>::get_values(std::vector<dom::element>& out) const noexcept {
+  return first.get_values(out);
 }
 
 namespace dom {
@@ -7306,6 +7503,93 @@ inline simdjson_result<element> array::at_path(std::string_view json_path) const
   return at_pointer(json_pointer);
 }
 
+inline void array::process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept {
+  if (current == end) {
+    return;
+  }
+
+  simdjson_result<std::vector<element>> result;
+
+
+  for (auto it = current; it != end; ++it) {
+    std::vector<element> child_result;
+    auto error = it->at_path_with_wildcard(path_suffix).get(child_result);
+    if(error) {
+      continue;
+    }
+    accumulator.reserve(accumulator.size() + child_result.size());
+    accumulator.insert(accumulator.end(),
+                        std::make_move_iterator(child_result.begin()),
+                        std::make_move_iterator(child_result.end()));
+  }
+}
+
+inline simdjson_result<std::vector<element>> array::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+
+  size_t i = 0;
+   // json_path.starts_with('$') requires C++20.
+  if (!json_path.empty() && json_path.front() == '$') {
+    i = 1;
+  }
+
+  if (i >= json_path.size() || (json_path[i] != '.' && json_path[i] != '[')) {
+    return INVALID_JSON_POINTER;
+  }
+
+  if (json_path.find("*") != std::string::npos) {
+    std::vector<element> child_values;
+
+    if (
+      (json_path.compare(i, 3, "[*]") == 0 && json_path.size() == i + 3) ||
+      (json_path.compare(i, 2,".*") == 0 && json_path.size() == i + 2)
+    ) {
+      get_values(child_values);
+      return child_values;
+    }
+
+    std::pair<std::string_view, std::string_view> key_and_json_path = get_next_key_and_json_path(json_path);
+
+    std::string_view key = key_and_json_path.first;
+    json_path = key_and_json_path.second;
+
+    if (key.size() > 0) {
+      if (key == "*") {
+        get_values(child_values);
+      } else {
+        element pointer_result;
+        std::string json_pointer = std::string("/") + std::string(key);
+        auto error = at_pointer(json_pointer).get(pointer_result);
+
+        if (!error) {
+          child_values.emplace_back(pointer_result);
+        }
+      }
+
+      std::vector<element> result = {};
+
+      if (child_values.size() > 0) {
+        std::vector<element>::iterator child_values_begin = child_values.begin();
+        std::vector<element>::iterator child_values_end = child_values.end();
+
+        process_json_path_of_child_elements(child_values_begin, child_values_end, json_path, result);
+      }
+
+      return result;
+    } else {
+      return INVALID_JSON_POINTER;
+    }
+  } else {
+    element result;
+    auto error = at_path(json_path).get(result);
+    if (error) {
+      return error;
+    }
+
+    return std::vector<element>{std::move(result)};
+  }
+}
+
 inline simdjson_result<element> array::at(size_t index) const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
   size_t i=0;
@@ -7314,6 +7598,15 @@ inline simdjson_result<element> array::at(size_t index) const noexcept {
     i++;
   }
   return INDEX_OUT_OF_BOUNDS;
+}
+
+inline std::vector<element>& array::get_values(std::vector<element>& out) const noexcept {
+  out.reserve(this->size());
+  for (auto element : *this) {
+    out.emplace_back(element);
+  }
+
+  return out;
 }
 
 inline array::operator element() const noexcept {
@@ -7415,9 +7708,18 @@ inline simdjson_result<dom::element> simdjson_result<dom::object>::at_path(std::
   if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
   return at_pointer(json_pointer);
 }
+inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::object>::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  if (error()) {
+    return error();
+  }
+  return first.at_path_with_wildcard(json_path);
+}
 inline simdjson_result<dom::element> simdjson_result<dom::object>::at_key(std::string_view key) const noexcept {
   if (error()) { return error(); }
   return first.at_key(key);
+}
+inline std::vector<dom::element>& simdjson_result<dom::object>::get_values(std::vector<dom::element>& out) const noexcept {
+  return first.get_values(out);
 }
 inline simdjson_result<dom::element> simdjson_result<dom::object>::at_key_case_insensitive(std::string_view key) const noexcept {
   if (error()) { return error(); }
@@ -7518,6 +7820,97 @@ inline simdjson_result<element> object::at_path(std::string_view json_path) cons
   return at_pointer(json_pointer);
 }
 
+inline void object::process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept {
+  if (current == end) {
+    return;
+  }
+
+  simdjson_result<std::vector<element>> result;
+
+  for (auto it = current; it != end; ++it) {
+    std::vector<element> child_result;
+    auto error = it->at_path_with_wildcard(path_suffix).get(child_result);
+    if(error) {
+      continue;
+    }
+    accumulator.reserve(accumulator.size() + child_result.size());
+    accumulator.insert(accumulator.end(),
+                        std::make_move_iterator(child_result.begin()),
+                        std::make_move_iterator(child_result.end()));
+  }
+}
+
+inline simdjson_result<std::vector<element>> object::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+
+  size_t i = 0;
+  if (json_path.empty()) {
+    return INVALID_JSON_POINTER;
+  }
+  // if JSONPath starts with $, skip it
+  // json_path.starts_with('$') requires C++20.
+  if (json_path.front() == '$') {
+    i = 1;
+  }
+
+  if (i >= json_path.size() || (json_path[i] != '.' && json_path[i] != '[')) {
+    // expect json path to always start with $ but this isn't currently
+    // expected in jsonpathutil.h.
+    return INVALID_JSON_POINTER;
+  }
+
+  if (json_path.find("*") != std::string::npos) {
+
+    std::vector<element> child_values;
+
+    if (
+      (json_path.compare(i, 3, "[*]") == 0 && json_path.size() == i + 3) ||
+      (json_path.compare(i, 2,".*") == 0 && json_path.size() == i + 2)
+    ) {
+      get_values(child_values);
+      return child_values;
+    }
+
+    std::pair<std::string_view, std::string_view> key_and_json_path = get_next_key_and_json_path(json_path);
+
+    std::string_view key = key_and_json_path.first;
+    json_path = key_and_json_path.second;
+
+    if (key.size() > 0) {
+      if (key == "*") {
+        get_values(child_values);
+      } else {
+        element pointer_result;
+        auto error = at_pointer(std::string("/") + std::string(key)).get(pointer_result);
+
+        if (!error) {
+          child_values.emplace_back(pointer_result);
+        }
+      }
+
+      std::vector<element> result = {};
+      if (child_values.size() > 0) {
+
+        std::vector<element>::iterator child_values_begin = child_values.begin();
+        std::vector<element>::iterator child_values_end = child_values.end();
+
+        process_json_path_of_child_elements(child_values_begin, child_values_end, json_path, result);
+      }
+
+      return result;
+    } else {
+      return INVALID_JSON_POINTER;
+    }
+  } else {
+    element result;
+    auto error = this->at_path(json_path).get(result);
+    if (error) {
+      return error;
+    }
+    return std::vector<element>{std::move(result)};
+  }
+}
+
 inline simdjson_result<element> object::at_key(std::string_view key) const noexcept {
   iterator end_field = end();
   for (iterator field = begin(); field != end_field; ++field) {
@@ -7526,6 +7919,18 @@ inline simdjson_result<element> object::at_key(std::string_view key) const noexc
     }
   }
   return NO_SUCH_FIELD;
+}
+
+inline std::vector<element>& object::get_values(std::vector<element>& out) const noexcept {
+  iterator end_field = end();
+  iterator begin_field = begin();
+
+  out.reserve(std::distance(begin_field, end_field));
+  for (iterator field = begin_field; field != end_field; ++field) {
+    out.emplace_back(field.value());
+  }
+
+  return out;
 }
 // In case you wonder why we need this, please see
 // https://github.com/simdjson/simdjson/issues/323
@@ -7769,6 +8174,12 @@ simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at_
   if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
   return at_pointer(json_pointer);
 }
+
+simdjson_inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::element>::at_path_with_wildcard(const std::string_view json_path) const noexcept {
+  if (error()) { return error(); }
+  return first.at_path_with_wildcard(json_path);
+}
+
 #ifndef SIMDJSON_DISABLE_DEPRECATED_API
 [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
 simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at(const std::string_view json_pointer) const noexcept {
@@ -7852,6 +8263,15 @@ inline simdjson_result<bool> element::get_bool() const noexcept {
     return false;
   }
   return INCORRECT_TYPE;
+}
+inline simdjson_result<std::span<const std::byte>> element::get_binary() const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+  switch (tape.tape_ref_type()) {
+  case internal::tape_type::BINARY:
+    return tape.get_binary();
+  default:
+    return INCORRECT_TYPE;
+  }
 }
 inline simdjson_result<const char *> element::get_c_str() const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
@@ -7975,6 +8395,7 @@ simdjson_inline bool element::is() const noexcept {
 
 template<> inline simdjson_result<array> element::get<array>() const noexcept { return get_array(); }
 template<> inline simdjson_result<object> element::get<object>() const noexcept { return get_object(); }
+template<> inline simdjson_result<std::span<const std::byte>> element::get<std::span<const std::byte>>() const noexcept { return get_binary(); }
 template<> inline simdjson_result<const char *> element::get<const char *>() const noexcept { return get_c_str(); }
 template<> inline simdjson_result<std::string_view> element::get<std::string_view>() const noexcept { return get_string(); }
 template<> inline simdjson_result<int64_t> element::get<int64_t>() const noexcept { return get_int64(); }
@@ -7989,6 +8410,7 @@ inline bool element::is_int64() const noexcept { return is<int64_t>(); }
 inline bool element::is_uint64() const noexcept { return is<uint64_t>(); }
 inline bool element::is_double() const noexcept { return is<double>(); }
 inline bool element::is_bool() const noexcept { return is<bool>(); }
+inline bool element::is_binary() const noexcept { return is<std::span<const std::byte>>(); }
 inline bool element::is_number() const noexcept { return is_int64() || is_uint64() || is_double(); }
 
 inline bool element::is_null() const noexcept {
@@ -8005,6 +8427,7 @@ inline element::operator int64_t() const noexcept(false) { return get<int64_t>()
 inline element::operator double() const noexcept(false) { return get<double>(); }
 inline element::operator array() const noexcept(false) { return get<array>(); }
 inline element::operator object() const noexcept(false) { return get<object>(); }
+inline element::operator std::span<const std::byte>() const noexcept(false) { return get<std::span<const std::byte>>(); }
 
 inline array::iterator element::begin() const noexcept(false) {
   return get<array>().begin();
@@ -8059,6 +8482,20 @@ inline simdjson_result<element> element::at_pointer(std::string_view json_pointe
     }
   }
 }
+
+inline simdjson_result<std::vector<element>> element::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+
+  switch (tape.tape_ref_type()) {
+    case internal::tape_type::START_OBJECT:
+      return object(tape).at_path_with_wildcard(json_path);
+    case internal::tape_type::START_ARRAY:
+      return array(tape).at_path_with_wildcard(json_path);
+    default:
+      return std::vector<element>{};
+  }
+}
+
 inline simdjson_result<element> element::at_path(std::string_view json_path) const noexcept {
   auto json_pointer = json_path_to_pointer_conversion(json_path);
   if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
@@ -8183,11 +8620,11 @@ inline bool parser::dump_raw_tape(std::ostream &os) const noexcept {
   return valid ? doc.dump_raw_tape(os) : false;
 }
 
-inline simdjson_result<size_t> parser::read_file(const std::string &path) noexcept {
+inline simdjson_result<size_t> parser::read_file(std::string_view path) noexcept {
   // Open the file
   SIMDJSON_PUSH_DISABLE_WARNINGS
   SIMDJSON_DISABLE_DEPRECATED_WARNING // Disable CRT_SECURE warning on MSVC: manually verified this is safe
-  std::FILE *fp = std::fopen(path.c_str(), "rb");
+  std::FILE *fp = std::fopen(path.data(), "rb");
   SIMDJSON_POP_DISABLE_WARNINGS
 
   if (fp == nullptr) {
@@ -8239,18 +8676,18 @@ inline simdjson_result<size_t> parser::read_file(const std::string &path) noexce
   return bytes_read;
 }
 
-inline simdjson_result<element> parser::load(const std::string &path) & noexcept {
+inline simdjson_result<element> parser::load(std::string_view path) & noexcept {
   return load_into_document(doc, path);
 }
 
-inline simdjson_result<element> parser::load_into_document(document& provided_doc, const std::string &path) & noexcept {
+inline simdjson_result<element> parser::load_into_document(document& provided_doc, std::string_view path) & noexcept {
   size_t len;
   auto _error = read_file(path).get(len);
   if (_error) { return _error; }
   return parse_into_document(provided_doc, loaded_bytes.get(), len, false);
 }
 
-inline simdjson_result<document_stream> parser::load_many(const std::string &path, size_t batch_size) noexcept {
+inline simdjson_result<document_stream> parser::load_many(std::string_view path, size_t batch_size) noexcept {
   size_t len;
   auto _error = read_file(path).get(len);
   if (_error) { return _error; }
@@ -33922,7 +34359,22 @@ public:
   simdjson_result<arm64::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -34534,6 +34986,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -35017,7 +35470,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -35110,6 +35565,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -35139,11 +35606,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -36169,11 +36636,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -42002,7 +42485,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -42018,7 +42501,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -42050,10 +42533,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -42075,7 +42555,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -42090,6 +42570,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -42099,22 +42580,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -43798,7 +44280,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -46752,7 +47234,22 @@ public:
   simdjson_result<fallback::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -47364,6 +47861,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -47847,7 +48345,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -47940,6 +48440,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -47969,11 +48481,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -48999,11 +49511,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -54832,7 +55360,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -54848,7 +55376,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -54880,10 +55408,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -54905,7 +55430,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -54920,6 +55445,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -54929,22 +55455,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -56628,7 +57155,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -60081,7 +60608,22 @@ public:
   simdjson_result<haswell::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -60693,6 +61235,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -61176,7 +61719,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -61269,6 +61814,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -61298,11 +61855,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -62328,11 +62885,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -68161,7 +68734,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -68177,7 +68750,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -68209,10 +68782,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -68234,7 +68804,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -68249,6 +68819,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -68258,22 +68829,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -69957,7 +70529,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -73410,7 +73982,22 @@ public:
   simdjson_result<icelake::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -74022,6 +74609,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -74505,7 +75093,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -74598,6 +75188,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -74627,11 +75229,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -75657,11 +76259,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -81490,7 +82108,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -81506,7 +82124,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -81538,10 +82156,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -81563,7 +82178,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -81578,6 +82193,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -81587,22 +82203,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -83286,7 +83903,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -86854,7 +87471,22 @@ public:
   simdjson_result<ppc64::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -87466,6 +88098,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -87949,7 +88582,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -88042,6 +88677,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -88071,11 +88718,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -89101,11 +89748,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -94934,7 +95597,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -94950,7 +95613,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -94982,10 +95645,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -95007,7 +95667,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -95022,6 +95682,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -95031,22 +95692,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -96730,7 +97392,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -100614,7 +101276,22 @@ public:
   simdjson_result<westmere::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -101226,6 +101903,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -101709,7 +102387,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -101802,6 +102482,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -101831,11 +102523,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -102861,11 +103553,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -108694,7 +109402,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -108710,7 +109418,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -108742,10 +109450,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -108767,7 +109472,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -108782,6 +109487,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -108791,22 +109497,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -110490,7 +111197,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -113851,7 +114558,22 @@ public:
   simdjson_result<lsx::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -114463,6 +115185,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -114946,7 +115669,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -115039,6 +115764,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -115068,11 +115805,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -116098,11 +116835,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -121931,7 +122684,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -121947,7 +122700,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -121979,10 +122732,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -122004,7 +122754,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -122019,6 +122769,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -122028,22 +122779,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -123727,7 +124479,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -127101,7 +127853,22 @@ public:
   simdjson_result<lasx::ondemand::value> operator[](int) noexcept = delete;
 
   /**
-   * Get the type of this JSON value.
+   * Get the type of this JSON value. It does not validate or consume the value.
+   * E.g., you must still call "is_null()" to check that a value is null even if
+   * "type()" returns json_type::null.
+   *
+   * Given a valid JSON document, the answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
@@ -127713,6 +128480,7 @@ namespace ondemand {
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -128196,7 +128964,9 @@ public:
   simdjson_warn_unused simdjson_result<document> iterate(std::string_view json, size_t capacity) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const std::string &json) & noexcept;
-  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
+  /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept
+      The string instance might be have its capacity extended. Note that this can still
+      result in AddressSanitizer: container-overflow in some cases. */
   simdjson_warn_unused simdjson_result<document> iterate(std::string &json) & noexcept;
   /** @overload simdjson_result<document> iterate(padded_string_view json) & noexcept */
   simdjson_warn_unused simdjson_result<document> iterate(const simdjson_result<padded_string> &json) & noexcept;
@@ -128289,6 +129059,18 @@ public:
    * When compiled with SIMDJSON_THREADS_ENABLED, this method will use a single thread under the
    * hood to do some lookahead.
    *
+   * ### REQUIRED: Buffer Padding
+   *
+   * The buffer must have at least SIMDJSON_PADDING extra allocated bytes. It does not matter what
+   * those bytes are initialized to, as long as they are allocated. These bytes will be read: if you
+   * using a sanitizer that verifies that no uninitialized byte is read, then you should initialize the
+   * SIMDJSON_PADDING bytes to avoid runtime warnings.
+   *
+   * This is checked automatically with all iterate_many function calls, except for the two
+   * that take pointers (const char* or const uint8_t*).
+   *
+   * ### Threads
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than batch_size, it will allocate enough capacity
@@ -128318,11 +129100,11 @@ public:
   inline simdjson_result<document_stream> iterate_many(const char *buf, size_t len, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const std::string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+    the string might be automatically padded with up to SIMDJSON_PADDING whitespace characters */
+  inline simdjson_result<document_stream> iterate_many(std::string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> iterate_many(const padded_string &s, size_t batch_size = DEFAULT_BATCH_SIZE, bool allow_comma_separated = false) noexcept;
-  inline simdjson_result<document_stream> iterate_many(const padded_string &&s, size_t batch_size, bool allow_comma_separated = false) = delete;// unsafe
-
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> iterate_many(const char *buf, size_t batch_size = DEFAULT_BATCH_SIZE) noexcept = delete;
 
@@ -129348,11 +130130,27 @@ public:
    * E.g., you must still call "is_null()" to check that a value is null even if
    * "type()" returns json_type::null.
    *
+   * The answer can be one of
+   * simdjson::ondemand::json_type::object,
+   * simdjson::ondemand::json_type::array,
+   * simdjson::ondemand::json_type::string,
+   * simdjson::ondemand::json_type::number,
+   * simdjson::ondemand::json_type::boolean,
+   * simdjson::ondemand::json_type::null.
+   *
+   * Starting with simdjson 4.0, this function will return simdjson::ondemand::json_type::unknown
+   * given a bad token.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
+   *
    * NOTE: If you're only expecting a value to be one type (a typical case), it's generally
    * better to just call .get_double, .get_string, etc. and check for INCORRECT_TYPE (or just
    * let it throw an exception).
    *
-   * @error TAPE_ERROR when the JSON value is a bad token like "}" "," or "alse".
+   * Prior to simdjson 4.0, this function would return an error given a bad token.
+   * Starting with simdjson 4.0, it will return simdjson::ondemand::json_type::unknown.
+   * This allows you to identify a case such as {"key": NaN} and identify the NaN value.
+   * The simdjson::ondemand::json_type::unknown value should only happen with non-valid JSON.
    */
   simdjson_inline simdjson_result<json_type> type() noexcept;
 
@@ -135181,7 +135979,7 @@ simdjson_inline simdjson_warn_unused bool parser::string_buffer_overflow(const u
 #endif
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -135197,7 +135995,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(p
 
 #ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate_allow_incomplete_json(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -135229,10 +136027,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(s
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(std::string &json) & noexcept {
-  if(json.capacity() - json.size() < SIMDJSON_PADDING) {
-    json.reserve(json.size() + SIMDJSON_PADDING);
-  }
-  return iterate(padded_string_view(json));
+  return iterate(pad_with_reserve(json));
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(const std::string &json) & noexcept {
@@ -135254,7 +136049,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<document> parser::iterate(c
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iterate_raw(padded_string_view json) & noexcept {
-  if (json.padding() < SIMDJSON_PADDING) { return INSUFFICIENT_PADDING; }
+  if (!json.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
 
   json.remove_utf8_bom();
 
@@ -135269,6 +136064,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<json_iterator> parser::iter
 }
 
 inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
   if((len >= 3) && (std::memcmp(buf, "\xEF\xBB\xBF", 3) == 0)) {
     buf += 3;
@@ -135278,22 +136074,23 @@ inline simdjson_result<document_stream> parser::iterate_many(const uint8_t *buf,
   return document_stream(*this, buf, len, batch_size, allow_comma_separated);
 }
 
-inline simdjson_result<document_stream> parser::iterate_many(padded_string_view json, size_t batch_size, bool allow_comma_separated) noexcept {
-  if(batch_size < MINIMAL_BATCH_SIZE) { batch_size = MINIMAL_BATCH_SIZE; }
-  if(allow_comma_separated && batch_size < json.length()) { batch_size = json.length(); }
-  return iterate_many(json.data(), json.length(), batch_size, allow_comma_separated);
-}
-
 inline simdjson_result<document_stream> parser::iterate_many(const char *buf, size_t len, size_t batch_size, bool allow_comma_separated) noexcept {
+  // Warning: no check is done on the buffer padding. We trust the user.
   return iterate_many(reinterpret_cast<const uint8_t *>(buf), len, batch_size, allow_comma_separated);
 }
-inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+inline simdjson_result<document_stream> parser::iterate_many(padded_string_view s, size_t batch_size, bool allow_comma_separated) noexcept {
+  if (!s.has_sufficient_padding()) { return INSUFFICIENT_PADDING; }
   return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
 }
 inline simdjson_result<document_stream> parser::iterate_many(const padded_string &s, size_t batch_size, bool allow_comma_separated) noexcept {
-  return iterate_many(s.data(), s.length(), batch_size, allow_comma_separated);
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
 }
-
+inline simdjson_result<document_stream> parser::iterate_many(const std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(padded_string_view(s), batch_size, allow_comma_separated);
+}
+inline simdjson_result<document_stream> parser::iterate_many(std::string &s, size_t batch_size, bool allow_comma_separated) noexcept {
+  return iterate_many(pad(s), batch_size, allow_comma_separated);
+}
 simdjson_pure simdjson_inline size_t parser::capacity() const noexcept {
   return _capacity;
 }
@@ -136977,7 +137774,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -138236,181 +139033,87 @@ namespace simdjson {
 /* end file simdjson/ondemand.h */
 /* including simdjson/convert.h: #include "simdjson/convert.h" */
 /* begin file simdjson/convert.h */
+
 #ifndef SIMDJSON_CONVERT_H
 #define SIMDJSON_CONVERT_H
-#if __cpp_concepts
 
 /* skipped duplicate #include "simdjson/ondemand.h" */
 #include <optional>
 
+#if SIMDJSON_SUPPORTS_DESERIALIZATION
+
+
 namespace simdjson {
-
-template <typename ParserType = ondemand::parser*>
-struct auto_parser
-{
-  using value_type = simdjson_result<ondemand::value>;
-  using size_type = size_t;
-  using difference_type = std::ptrdiff_t;
-  using pointer = value_type *;
-  using const_pointer = const value_type *;
-  using reference = value_type &;
-  using const_reference = const value_type &;
-
-private:
-  ParserType m_parser;
-  ondemand::document m_doc;
-  error_code m_error{SUCCESS};
-
-  template <typename T>
-  static constexpr bool is_nothrow_gettable = requires(ondemand::document doc) {
-    { doc.get<T>() } noexcept;
-  };
-
-public:
-  // non-pointer constructors:
-  explicit auto_parser(ParserType &&parser, ondemand::document &&doc) noexcept
-    requires(!std::is_pointer_v<ParserType>)
-      : m_parser{std::move(parser)}, m_doc{std::move(doc)} {}
-
-  explicit auto_parser(ParserType &&parser,
-                       padded_string_view const str) noexcept
-    requires(!std::is_pointer_v<ParserType>)
-      : m_parser{std::move(parser)}, m_doc{}, m_error{SUCCESS} {
-    m_error = m_parser.iterate(str).get(m_doc);
-  }
-
-  // pointer constructors:
-  explicit auto_parser(std::remove_pointer_t<ParserType> &parser,
-                       ondemand::document &&doc) noexcept
-    requires(std::is_pointer_v<ParserType>)
-      : m_parser{&parser}, m_doc{std::move(doc)} {}
-
-  explicit auto_parser(std::remove_pointer_t<ParserType> &parser,
-                       padded_string_view const str) noexcept
-    requires(std::is_pointer_v<ParserType>)
-      : m_parser{&parser}, m_doc{}, m_error{SUCCESS} {
-    m_error = m_parser->iterate(str).get(m_doc);
-  }
-
-  explicit auto_parser(padded_string_view const str) noexcept
-    requires(std::is_pointer_v<ParserType>)
-      : auto_parser{ondemand::parser::get_parser(), str} {}
-
-  explicit auto_parser(ParserType parser, ondemand::document &&doc) noexcept
-    requires(std::is_pointer_v<ParserType>)
-      : auto_parser{*parser, std::move(doc)} {}
-
-  auto_parser(auto_parser const &) = delete;
-  auto_parser &operator=(auto_parser const &) = delete;
-  auto_parser(auto_parser &&) noexcept = default;
-  auto_parser &operator=(auto_parser &&) noexcept = default;
-  ~auto_parser() = default;
-
-  /// Get the parser
-  simdjson_warn_unused std::remove_pointer_t<ParserType> &parser() noexcept {
-    if constexpr (std::is_pointer_v<ParserType>) {
-      return *m_parser;
-    } else {
-      return m_parser;
-    }
-  }
-
-  template <typename T>
-  simdjson_warn_unused simdjson_inline simdjson_result<T>
-  result() noexcept(is_nothrow_gettable<T>) {
-    if (m_error != SUCCESS) {
-      return m_error;
-    }
-    // For array and object types, we need to be at the start of the document
-    return m_doc.get<T>();
-  }
-
-  simdjson_warn_unused simdjson_inline simdjson_result<ondemand::array>
-  array() noexcept {
-    return result<ondemand::array>();
-  }
-
-  simdjson_warn_unused simdjson_inline simdjson_result<ondemand::object>
-  object() noexcept {
-    return result<ondemand::object>();
-  }
-
-  simdjson_warn_unused simdjson_inline simdjson_result<ondemand::number>
-  number() noexcept {
-    return result<ondemand::number>();
-  }
-
-  template <typename T>
-  simdjson_warn_unused simdjson_inline explicit(false)
-  operator simdjson_result<T>() noexcept(is_nothrow_gettable<T>) {
-    return result<T>();
-  }
-
-  template <typename T>
-  simdjson_warn_unused simdjson_inline explicit(false) operator T() noexcept(false) {
-    if (m_error != SUCCESS) {
-      throw simdjson_error(m_error);
-    }
-    return m_doc.get<T>();
-  }
-
-  // We can't have "operator std::optional<T>" because it would create an
-  // ambiguity for the compiler.
-  // We also cannot have "operator T*" without manual memory management.
-  // We also cannot have "operator T&" without manual memory management either.
-
-  template <typename T>
-  simdjson_warn_unused simdjson_inline std::optional<T>
-  optional() noexcept(is_nothrow_gettable<T>) {
-    if (m_error != SUCCESS) {
-      return std::nullopt;
-    }
-    T value;
-    // For std::optional<T>
-    if (m_doc.get<T>().get(value)) [[unlikely]] {
-      return std::nullopt;
-    }
-    return {std::move(value)};
-  }
-};
-
-
-
-template <typename T = void>
-struct to_adaptor {
-
-  /// Convert to T
-  T operator()(simdjson_result<ondemand::value> &val) const noexcept {
-    return val.get<T>();
-  }
-  /**
-   * Parse input string into any object if possible. This function call
-   * will return an auto_parser that can be used to extract the desired
-   * object from the input string. The ondemand::parser instance is created
-   * internally.
-   *
-   * This function uses the simdjson::ondemand::parser::get_parser() instance.
-   * A parser should only be used for one document at a time.
-   */
-  auto operator()(padded_string_view const str) const noexcept {
-    return auto_parser{str};
-  }
-
-  /**
-   * Parse the input using the specified parser into any object if possible.
-   * This function call will return an auto_parser that can be used to extract
-   * the desired object from the input string. The provided ondemand::parser instance
-   * handles memory allocations and indexing, and it can be reused from call to call.
-   */
-  auto operator()(ondemand::parser &parser,
-                            padded_string_view const str) const noexcept {
-    return auto_parser<ondemand::parser *>{parser, str};
-  }
-};
-
-template <typename T> static constexpr to_adaptor<T> to{};
+namespace convert {
+namespace internal {
 
 /**
+ * A utility class for automatically parsing JSON documents.
+ * This template is NOT part of our public API.
+ * It is subject to changes.
+ * @private
+ */
+template <typename parser_type = ondemand::parser*>
+struct auto_parser {
+private:
+	parser_type m_parser;
+	ondemand::document m_doc;
+	error_code m_error{SUCCESS};
+
+	template <typename T>
+	static constexpr bool is_nothrow_gettable = requires(ondemand::document doc) {
+		{ doc.get<T>() } noexcept;
+	};
+public:
+	explicit auto_parser(parser_type &&parser, ondemand::document &&doc) noexcept requires(!std::is_pointer_v<parser_type>);
+	explicit auto_parser(parser_type &&parser, padded_string_view const str) noexcept requires(!std::is_pointer_v<parser_type>);
+	explicit auto_parser(std::remove_pointer_t<parser_type> &parser, ondemand::document &&doc) noexcept requires(std::is_pointer_v<parser_type>);
+	explicit auto_parser(std::remove_pointer_t<parser_type> &parser, padded_string_view const str) noexcept requires(std::is_pointer_v<parser_type>);
+	explicit auto_parser(padded_string_view const str) noexcept requires(std::is_pointer_v<parser_type>);
+	explicit auto_parser(parser_type parser, ondemand::document &&doc) noexcept requires(std::is_pointer_v<parser_type>);
+		auto_parser(auto_parser const &) = delete;
+		auto_parser &operator=(auto_parser const &) = delete;
+		auto_parser(auto_parser &&) noexcept = default;
+		auto_parser &operator=(auto_parser &&) noexcept = default;
+		~auto_parser() = default;
+
+	simdjson_warn_unused std::remove_pointer_t<parser_type> &parser() noexcept;
+
+	template <typename T>
+	simdjson_warn_unused simdjson_inline simdjson_result<T> result() noexcept(is_nothrow_gettable<T>);
+
+	simdjson_warn_unused simdjson_inline simdjson_result<ondemand::array> array() noexcept;
+	simdjson_warn_unused simdjson_inline simdjson_result<ondemand::object> object() noexcept;
+	simdjson_warn_unused simdjson_inline simdjson_result<ondemand::number> number() noexcept;
+
+	template <typename T>
+	simdjson_warn_unused simdjson_inline explicit(false) operator simdjson_result<T>() noexcept(is_nothrow_gettable<T>);
+
+	template <typename T>
+	simdjson_warn_unused simdjson_inline explicit(false) operator T() noexcept(false);
+
+	template <typename T>
+	simdjson_warn_unused simdjson_inline std::optional<T> optional() noexcept(is_nothrow_gettable<T>);
+};
+
+
+/**
+ * A utility class for adapting values for the `auto_parser`.
+ * This template is not part of our public API. It is subject to changes.
+ * @private
+ */
+template <typename T = void>
+struct to_adaptor {
+	T operator()(simdjson_result<ondemand::value> &val) const noexcept;
+	auto operator()(padded_string_view const str) const noexcept;
+	auto operator()(ondemand::parser &parser, padded_string_view const str) const noexcept;
+};
+} // namespace internal
+} // namespace convert
+
+/**
+ * The simdjson::from instance is EXPERIMENTAL AND SUBJECT TO CHANGES.
+ *
  * The `from` instance is a utility adaptor for parsing JSON strings into objects.
  * It provides a convenient way to convert JSON data into C++ objects using the `auto_parser`.
  *
@@ -138433,13 +139136,140 @@ template <typename T> static constexpr to_adaptor<T> to{};
  * ```
  * The parser instance can be reused.
  *
+ * This functionality requires C++20 or better.
  */
-static constexpr to_adaptor<> from{};
+static constexpr convert::internal::to_adaptor<> from{};
 
 } // namespace simdjson
 
-#endif // __cpp_concepts
+#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
 #endif // SIMDJSON_CONVERT_H
 /* end file simdjson/convert.h */
+/* including simdjson/convert-inl.h: #include "simdjson/convert-inl.h" */
+/* begin file simdjson/convert-inl.h */
+
+#ifndef SIMDJSON_CONVERT_INL_H
+#define SIMDJSON_CONVERT_INL_H
+
+/* skipped duplicate #include "simdjson/convert.h" */
+#if SIMDJSON_SUPPORTS_DESERIALIZATION
+namespace simdjson {
+namespace convert {
+namespace internal {
+// auto_parser method definitions
+template <typename parser_type>
+inline auto_parser<parser_type>::auto_parser(parser_type &&parser, ondemand::document &&doc) noexcept requires(!std::is_pointer_v<parser_type>)
+  : m_parser{std::move(parser)}, m_doc{std::move(doc)} {}
+
+template <typename parser_type>
+inline auto_parser<parser_type>::auto_parser(parser_type &&parser, padded_string_view const str) noexcept requires(!std::is_pointer_v<parser_type>)
+  : m_parser{std::move(parser)}, m_doc{}, m_error{SUCCESS} {
+  m_error = m_parser.iterate(str).get(m_doc);
+}
+
+template <typename parser_type>
+inline auto_parser<parser_type>::auto_parser(std::remove_pointer_t<parser_type> &parser, ondemand::document &&doc) noexcept requires(std::is_pointer_v<parser_type>)
+  : m_parser{&parser}, m_doc{std::move(doc)} {}
+
+template <typename parser_type>
+inline auto_parser<parser_type>::auto_parser(std::remove_pointer_t<parser_type> &parser, padded_string_view const str) noexcept requires(std::is_pointer_v<parser_type>)
+  : m_parser{&parser}, m_doc{}, m_error{SUCCESS} {
+  m_error = m_parser->iterate(str).get(m_doc);
+}
+
+template <typename parser_type>
+inline auto_parser<parser_type>::auto_parser(padded_string_view const str) noexcept requires(std::is_pointer_v<parser_type>)
+  : auto_parser{ondemand::parser::get_parser(), str} {}
+
+template <typename parser_type>
+inline auto_parser<parser_type>::auto_parser(parser_type parser, ondemand::document &&doc) noexcept requires(std::is_pointer_v<parser_type>)
+  : auto_parser{*parser, std::move(doc)} {}
+
+
+
+
+
+template <typename parser_type>
+inline std::remove_pointer_t<parser_type> &auto_parser<parser_type>::parser() noexcept {
+  if constexpr (std::is_pointer_v<parser_type>) {
+    return *m_parser;
+  } else {
+    return m_parser;
+  }
+}
+
+template <typename parser_type>
+template <typename T>
+inline simdjson_result<T> auto_parser<parser_type>::result() noexcept(is_nothrow_gettable<T>) {
+  if (m_error != SUCCESS) {
+    return m_error;
+  }
+  return m_doc.get<T>();
+}
+
+template <typename parser_type>
+inline simdjson_result<ondemand::array> auto_parser<parser_type>::array() noexcept {
+  return result<ondemand::array>();
+}
+
+template <typename parser_type>
+inline simdjson_result<ondemand::object> auto_parser<parser_type>::object() noexcept {
+  return result<ondemand::object>();
+}
+
+template <typename parser_type>
+inline simdjson_result<ondemand::number> auto_parser<parser_type>::number() noexcept {
+  return result<ondemand::number>();
+}
+
+template <typename parser_type>
+template <typename T>
+inline auto_parser<parser_type>::operator simdjson_result<T>() noexcept(is_nothrow_gettable<T>) {
+  return result<T>();
+}
+
+template <typename parser_type>
+template <typename T>
+inline auto_parser<parser_type>::operator T() noexcept(false) {
+  if (m_error != SUCCESS) {
+    throw simdjson_error(m_error);
+  }
+  return m_doc.get<T>();
+}
+
+template <typename parser_type>
+template <typename T>
+inline std::optional<T> auto_parser<parser_type>::optional() noexcept(is_nothrow_gettable<T>) {
+  if (m_error != SUCCESS) {
+    return std::nullopt;
+  }
+  T value;
+  if (m_doc.get<T>().get(value)) [[unlikely]] {
+    return std::nullopt;
+  }
+  return {std::move(value)};
+}
+
+// to_adaptor method definitions
+template <typename T>
+inline T to_adaptor<T>::operator()(simdjson_result<ondemand::value> &val) const noexcept {
+  return val.get<T>();
+}
+
+template <typename T>
+inline auto to_adaptor<T>::operator()(padded_string_view const str) const noexcept {
+  return auto_parser{str};
+}
+
+template <typename T>
+inline auto to_adaptor<T>::operator()(ondemand::parser &parser, padded_string_view const str) const noexcept {
+  return auto_parser<ondemand::parser *>{parser, str};
+}
+} // namespace internal
+} // namespace convert
+} // namespace simdjson
+#endif // SIMDJSON_SUPPORTS_DESERIALIZATION
+#endif // SIMDJSON_CONVERT_INL_H
+/* end file simdjson/convert-inl.h */
 #endif // SIMDJSON_H
 /* end file simdjson.h */
