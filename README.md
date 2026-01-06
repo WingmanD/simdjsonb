@@ -102,6 +102,23 @@ int main(void) {
    100 results.
   ```
 
+Binary support
+-------------
+
+Binary elements need to look like this:
+	"myBinary": b14_(1 1(�(1(1(1(1
+1. `b`
+2. number of bytes as text
+3. `_`
+4. raw binary data
+
+Please note - JSON specification does not support raw binary data, so using this feature breaks JSON specification and results in invalid JSON.
+Because of that, this library has UTF-8 checking disabled!
+
+Reading such elements:
+```c++
+  std::span<const std::byte> rawBytes = myJSON["myBinary"].get<std::span<const std::byte>>();
+```
 
 Documentation
 -------------
